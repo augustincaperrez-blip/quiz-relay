@@ -155,7 +155,7 @@ const server = http.createServer(async (req, res) => {
   try {
     if (url.pathname.startsWith("/api/")) return await handleApi(req, res, url.pathname);
     if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/index.html")) {
-      const html = fs.readFileSync(path.join(__dirname, "public", "index.html"));
+      const html = fs.readFileSync(path.join(__dirname, "index.html"));
       res.writeHead(200, { "Content-Type": "text/html; charset=utf-8" });
       return res.end(html);
     }
