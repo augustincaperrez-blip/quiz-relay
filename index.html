@@ -27,6 +27,7 @@
   .resultOk { color: #2ecc71; font-size: 28px; font-weight: bold; }
   .resultKo { color: #ff6b6b; font-size: 28px; font-weight: bold; }
   ul { list-style: none; padding: 0; margin: 0; }
+  button.leave { background: rgba(255,255,255,0.18); color: #fff; border: 2px solid rgba(255,255,255,0.5); font-size: 16px; padding: 12px; border-radius: 12px; font-weight: bold; cursor: pointer; }
   li { padding: 8px; font-size: 18px; border-bottom: 1px solid #e4dbf5; }
 </style>
 </head>
@@ -50,6 +51,7 @@
     <p class="muted">Attends que l'hôte lance la partie.</p>
     <ul id="playerList"></ul>
   </div>
+  <button class="leave" onclick="leaveGame()">↩ Quitter ce salon</button>
 </section>
 
 <section id="question" class="screen">
@@ -57,151 +59,17 @@
   <div class="card"><div id="questionText" style="font-size:22px;font-weight:bold"></div></div>
   <div class="answers" id="answers"></div>
   <p class="muted" id="sentInfo"></p>
+  <button class="leave" onclick="leaveGame()">↩ Quitter ce salon</button>
 </section>
 
 <section id="reveal" class="screen">
   <div id="resultText"></div>
   <p class="muted">En attente de la question suivante...</p>
+  <button class="leave" onclick="leaveGame()">↩ Quitter ce salon</button>
 </section>
 
 <section id="finished" class="screen">
   <h1>🏁 Partie terminée</h1>
-  <p class="muted">Regarde l'écran de l'hôte pour le classement final.</p>
-</section>
-
-<script>
-const SYMBOLS = ["▲", "◆", "●", "■"];
-const state = { code: "", playerId: null, name: "", screen: "join", lastQuestionId: null, myAnswer: null, questionTimer: null, endsAt: 0 };
-const $ = (id) => document.getElementById(id);
-
-function show(id) {
-  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
-  $(id).classList.add("active");
-  state.screen = id;
-}
-
-async function api(path, options = {}) {
-  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || "Erreur réseau");
-  return data;
-}
-
-async function join() {
-  $("joinError").textContent = "";
-  const code = $("codeInput").value.trim().toUpperCase();
-  const name = $("nameInput").value.trim();
-  if (code.length !== 6) return ($("joinError").textContent = "Le code fait 6 caractères.");
-  if (!name) return ($("joinError").textContent = "Choisis un pseudo.");
-  try {
-    const data = await api(`/api/rooms/${code}/join`, { method: "POST", body: JSON.stringify({ name }) });
-    state.code = code;
-    state.playerId = data.playerId;
-    state.name = name;
-    localStorage.setItem("quizSession", JSON.stringify({ code, playerId: data.playerId, name }));
-    startPolling();
-  } catch (err) {
-    $("joinError").textContent = err.message;
-  }
-}
-
-async function submitAnswer(index, button) {
-  if (state.myAnswer !== null) return;
-  state.myAnswer = index;
-  document.querySelectorAll("#answers .answer").forEach((b) => (b.disabled = true));
-  button.classList.add("chosen");
-  $("sentInfo").textContent = "Réponse envoyée !";
-  try {
-    await api(`/api/rooms/${state.code}/answer`, {
-      method: "POST",
-      body: JSON.stringify({ playerId: state.playerId, questionId: state.lastQuestionId, answer: index }),
-    });
-  } catch (err) {
-    $("sentInfo").textContent = err.message;
-  }
-}
-
-function renderQuestion(q) {
-  state.lastQuestionId = q.id;
-  state.myAnswer = null;
-  $("questionText").textContent = q.text;
-  const box = $("answers");
-  box.innerHTML = "";
-  const count = q.type === "true_false" ? 2 : q.answers.length;
-  for (let i = 0; i < count; i++) {
-    const b = document.createElement("button");
-    b.className = `answer c${i}`;
-    b.innerHTML = `${SYMBOLS[i]}<br>${q.type === "true_false" ? (i === 0 ? "Vrai" : "Faux") : q.answers[i]}`;
-    b.addEventListener("click", () => submitAnswer(i + 1, b));
-    box.appendChild(b);
-  }
-  $("sentInfo").textContent = "";
-  state.endsAt = Date.now() + q.seconds * 1000;
-  clearInterval(state.questionTimer);
-  state.questionTimer = setInterval(() => {
-    const left = Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000));
-    $("timer").textContent = left + " s";
-    if (left === 0) clearInterval(state.questionTimer);
-  }, 250);
-  show("question");
-}
-
-function renderReveal(correctIndex) {
-  const ok = state.myAnswer !== null && state.myAnswer === correctIndex;
-  const answered = state.myAnswer !== null;
-  $("resultText").innerHTML = answered
-    ? `<div class="${ok ? "resultOk" : "resultKo"}">${ok ? "✅ Bonne réponse !" : "❌ Raté"}</div>`
-    : `<div class="resultKo">⏱ Temps écoulé</div>`;
-  document.querySelectorAll("#answers .answer").forEach((b, i) => {
-    if (i + 1 === correctIndex) b.classList.add("correct");
-  });
-  show("reveal");
-}
-
-async function poll() {
-  if (!state.code) return;
-  try {
-    const room = await api(`/api/rooms/${state.code}`);
-    if (room.state === "lobby") {
-      $("playerList").innerHTML = room.players.map((p) => `<li>${escapeHtml(p.name)}</li>`).join("");
-      show("lobby");
-    } else if (room.state === "question" && room.question && room.question.id !== state.lastQuestionId) {
-      renderQuestion(room.question);
-    } else if (room.state === "reveal" && state.screen !== "reveal" && room.correctIndex) {
-      renderReveal(room.correctIndex);
-    } else if (room.state === "finished") {
-      show("finished");
-    }
-  } catch (err) {
-    // Salon fermé ou erreur réseau : on réessaie au prochain tour
-  }
-}
-
-function escapeHtml(text) {
-  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-}
-
-let pollTimer = null;
-function startPolling() {
-  show("lobby");
-  clearInterval(pollTimer);
-  pollTimer = setInterval(poll, 1000);
-  poll();
-}
-
-$("joinBtn").addEventListener("click", join);
-$("codeInput").addEventListener("input", (e) => (e.target.value = e.target.value.toUpperCase()));
-
-// Reprise automatique si la page est rechargée
-const saved = JSON.parse(localStorage.getItem("quizSession") || "null");
-if (saved) {
-  state.code = saved.code;
-  state.playerId = saved.playerId;
-  state.name = saved.name;
-  startPolling();
-}
-const params = new URLSearchParams(location.search);
-if (params.get("code") && !saved) $("codeInput").value = params.get("code").toUpperCase();
-</script>
-</body>
-</html>
+  <div class="card">
+    <div id="myResult" style="font-size:22px;font-weight:bold;margin-bottom:10px"></div>
+    <ol id="rankingList"
