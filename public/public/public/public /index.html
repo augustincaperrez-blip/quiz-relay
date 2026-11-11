@@ -1,0 +1,207 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Quiz Master</title>
+<style>
+  :root { --bg: #2e1f64; --card: #f7f3fd; --text: #2b1d4f; --muted: #6b5c8a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; min-height: 100vh; font-family: system-ui, -apple-system, "Segoe UI", sans-serif; background: var(--bg); color: var(--text); }
+  .screen { display: none; min-height: 100vh; padding: 20px; flex-direction: column; justify-content: center; align-items: stretch; gap: 14px; text-align: center; }
+  .screen.active { display: flex; }
+  h1 { color: #fff; margin: 0; font-size: 30px; }
+  .card { background: var(--card); border-radius: 18px; padding: 18px; }
+  input { font-size: 20px; padding: 14px; border-radius: 12px; border: 2px solid #d9cbef; text-align: center; width: 100%; }
+  input.code { text-transform: uppercase; letter-spacing: 4px; font-weight: bold; }
+  button.big { font-size: 20px; font-weight: bold; padding: 16px; border: none; border-radius: 14px; color: #fff; cursor: pointer; }
+  .answers { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  .answer { min-height: 22vh; border: none; border-radius: 16px; color: #fff; font-size: 20px; font-weight: bold; padding: 12px; cursor: pointer; display: flex; align-items: center; justify-content: center; text-align: center; }
+  .answer:disabled { opacity: 0.45; cursor: default; }
+  .answer.chosen { outline: 5px solid #fff; }
+  .answer.correct { outline: 5px solid #fff; box-shadow: 0 0 0 6px #2ecc71; }
+  .timer { font-size: 22px; font-weight: bold; color: #fff; }
+  .error { color: #ffb3b3; min-height: 20px; font-weight: bold; }
+  .muted { color: #cfc4ea; }
+  .c0 { background: #e21b3c; } .c1 { background: #1368ce; } .c2 { background: #d89e00; } .c3 { background: #26890c; }
+  .resultOk { color: #2ecc71; font-size: 28px; font-weight: bold; }
+  .resultKo { color: #ff6b6b; font-size: 28px; font-weight: bold; }
+  ul { list-style: none; padding: 0; margin: 0; }
+  li { padding: 8px; font-size: 18px; border-bottom: 1px solid #e4dbf5; }
+</style>
+</head>
+<body>
+
+<section id="join" class="screen active">
+  <h1>📱 Quiz Master</h1>
+  <div class="card">
+    <input id="codeInput" class="code" maxlength="6" placeholder="CODE" autocomplete="off">
+    <p></p>
+    <input id="nameInput" maxlength="16" placeholder="Ton pseudo" autocomplete="off">
+    <p></p>
+    <button class="big c3" id="joinBtn" style="width:100%">REJOINDRE</button>
+    <p class="error" id="joinError"></p>
+  </div>
+</section>
+
+<section id="lobby" class="screen">
+  <h1>Tu es dans le salon</h1>
+  <div class="card">
+    <p class="muted">Attends que l'hôte lance la partie.</p>
+    <ul id="playerList"></ul>
+  </div>
+</section>
+
+<section id="question" class="screen">
+  <div class="timer" id="timer"></div>
+  <div class="card"><div id="questionText" style="font-size:22px;font-weight:bold"></div></div>
+  <div class="answers" id="answers"></div>
+  <p class="muted" id="sentInfo"></p>
+</section>
+
+<section id="reveal" class="screen">
+  <div id="resultText"></div>
+  <p class="muted">En attente de la question suivante...</p>
+</section>
+
+<section id="finished" class="screen">
+  <h1>🏁 Partie terminée</h1>
+  <p class="muted">Regarde l'écran de l'hôte pour le classement final.</p>
+</section>
+
+<script>
+const SYMBOLS = ["▲", "◆", "●", "■"];
+const state = { code: "", playerId: null, name: "", screen: "join", lastQuestionId: null, myAnswer: null, questionTimer: null, endsAt: 0 };
+const $ = (id) => document.getElementById(id);
+
+function show(id) {
+  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
+  $(id).classList.add("active");
+  state.screen = id;
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Erreur réseau");
+  return data;
+}
+
+async function join() {
+  $("joinError").textContent = "";
+  const code = $("codeInput").value.trim().toUpperCase();
+  const name = $("nameInput").value.trim();
+  if (code.length !== 6) return ($("joinError").textContent = "Le code fait 6 caractères.");
+  if (!name) return ($("joinError").textContent = "Choisis un pseudo.");
+  try {
+    const data = await api(`/api/rooms/${code}/join`, { method: "POST", body: JSON.stringify({ name }) });
+    state.code = code;
+    state.playerId = data.playerId;
+    state.name = name;
+    localStorage.setItem("quizSession", JSON.stringify({ code, playerId: data.playerId, name }));
+    startPolling();
+  } catch (err) {
+    $("joinError").textContent = err.message;
+  }
+}
+
+async function submitAnswer(index, button) {
+  if (state.myAnswer !== null) return;
+  state.myAnswer = index;
+  document.querySelectorAll("#answers .answer").forEach((b) => (b.disabled = true));
+  button.classList.add("chosen");
+  $("sentInfo").textContent = "Réponse envoyée !";
+  try {
+    await api(`/api/rooms/${state.code}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ playerId: state.playerId, questionId: state.lastQuestionId, answer: index }),
+    });
+  } catch (err) {
+    $("sentInfo").textContent = err.message;
+  }
+}
+
+function renderQuestion(q) {
+  state.lastQuestionId = q.id;
+  state.myAnswer = null;
+  $("questionText").textContent = q.text;
+  const box = $("answers");
+  box.innerHTML = "";
+  const count = q.type === "true_false" ? 2 : q.answers.length;
+  for (let i = 0; i < count; i++) {
+    const b = document.createElement("button");
+    b.className = `answer c${i}`;
+    b.innerHTML = `${SYMBOLS[i]}<br>${q.type === "true_false" ? (i === 0 ? "Vrai" : "Faux") : q.answers[i]}`;
+    b.addEventListener("click", () => submitAnswer(i + 1, b));
+    box.appendChild(b);
+  }
+  $("sentInfo").textContent = "";
+  state.endsAt = Date.now() + q.seconds * 1000;
+  clearInterval(state.questionTimer);
+  state.questionTimer = setInterval(() => {
+    const left = Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000));
+    $("timer").textContent = left + " s";
+    if (left === 0) clearInterval(state.questionTimer);
+  }, 250);
+  show("question");
+}
+
+function renderReveal(correctIndex) {
+  const ok = state.myAnswer !== null && state.myAnswer === correctIndex;
+  const answered = state.myAnswer !== null;
+  $("resultText").innerHTML = answered
+    ? `<div class="${ok ? "resultOk" : "resultKo"}">${ok ? "✅ Bonne réponse !" : "❌ Raté"}</div>`
+    : `<div class="resultKo">⏱ Temps écoulé</div>`;
+  document.querySelectorAll("#answers .answer").forEach((b, i) => {
+    if (i + 1 === correctIndex) b.classList.add("correct");
+  });
+  show("reveal");
+}
+
+async function poll() {
+  if (!state.code) return;
+  try {
+    const room = await api(`/api/rooms/${state.code}`);
+    if (room.state === "lobby") {
+      $("playerList").innerHTML = room.players.map((p) => `<li>${escapeHtml(p.name)}</li>`).join("");
+      show("lobby");
+    } else if (room.state === "question" && room.question && room.question.id !== state.lastQuestionId) {
+      renderQuestion(room.question);
+    } else if (room.state === "reveal" && state.screen !== "reveal" && room.correctIndex) {
+      renderReveal(room.correctIndex);
+    } else if (room.state === "finished") {
+      show("finished");
+    }
+  } catch (err) {
+    // Salon fermé ou erreur réseau : on réessaie au prochain tour
+  }
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let pollTimer = null;
+function startPolling() {
+  show("lobby");
+  clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 1000);
+  poll();
+}
+
+$("joinBtn").addEventListener("click", join);
+$("codeInput").addEventListener("input", (e) => (e.target.value = e.target.value.toUpperCase()));
+
+// Reprise automatique si la page est rechargée
+const saved = JSON.parse(localStorage.getItem("quizSession") || "null");
+if (saved) {
+  state.code = saved.code;
+  state.playerId = saved.playerId;
+  state.name = saved.name;
+  startPolling();
+}
+const params = new URLSearchParams(location.search);
+if (params.get("code") && !saved) $("codeInput").value = params.get("code").toUpperCase();
+</script>
+</body>
+</html>
