@@ -72,4 +72,179 @@
   <h1>🏁 Partie terminée</h1>
   <div class="card">
     <div id="myResult" style="font-size:22px;font-weight:bold;margin-bottom:10px"></div>
-    <ol id="rankingList"
+    <ol id="rankingList" style="text-align:left;font-size:18px;padding-left:24px;margin:0"></ol>
+  </div>
+  <button class="big c1" id="newGameBtn">NOUVELLE PARTIE</button>
+</section>
+
+<script>
+const SYMBOLS = ["▲", "◆", "●", "■"];
+const state = { code: "", playerId: null, name: "", screen: "join", lastQuestionId: null, myAnswer: null, questionTimer: null, endsAt: 0 };
+const $ = (id) => document.getElementById(id);
+
+function show(id) {
+  document.querySelectorAll(".screen").forEach((s) => s.classList.remove("active"));
+  $(id).classList.add("active");
+  state.screen = id;
+}
+
+async function api(path, options = {}) {
+  const res = await fetch(path, { headers: { "Content-Type": "application/json" }, ...options });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Erreur réseau");
+  return data;
+}
+
+async function join() {
+  $("joinError").textContent = "";
+  const code = $("codeInput").value.trim().toUpperCase();
+  const name = $("nameInput").value.trim();
+  if (code.length !== 6) return ($("joinError").textContent = "Le code fait 6 caractères.");
+  if (!name) return ($("joinError").textContent = "Choisis un pseudo.");
+  try {
+    const data = await api(`/api/rooms/${code}/join`, { method: "POST", body: JSON.stringify({ name }) });
+    state.code = code;
+    state.playerId = data.playerId;
+    state.name = name;
+    localStorage.setItem("quizSession", JSON.stringify({ code, playerId: data.playerId, name }));
+    startPolling();
+  } catch (err) {
+    $("joinError").textContent = err.message;
+  }
+}
+
+async function submitAnswer(index, button) {
+  if (state.myAnswer !== null) return;
+  state.myAnswer = index;
+  document.querySelectorAll("#answers .answer").forEach((b) => (b.disabled = true));
+  button.classList.add("chosen");
+  $("sentInfo").textContent = "Réponse envoyée !";
+  try {
+    await api(`/api/rooms/${state.code}/answer`, {
+      method: "POST",
+      body: JSON.stringify({ playerId: state.playerId, questionId: state.lastQuestionId, answer: index }),
+    });
+  } catch (err) {
+    $("sentInfo").textContent = err.message;
+  }
+}
+
+function renderQuestion(q) {
+  state.lastQuestionId = q.id;
+  state.myAnswer = null;
+  $("questionText").textContent = q.text;
+  const box = $("answers");
+  box.innerHTML = "";
+  const count = q.type === "true_false" ? 2 : q.answers.length;
+  for (let i = 0; i < count; i++) {
+    const b = document.createElement("button");
+    b.className = `answer c${i}`;
+    b.innerHTML = `${SYMBOLS[i]}<br>${q.type === "true_false" ? (i === 0 ? "Vrai" : "Faux") : q.answers[i]}`;
+    b.addEventListener("click", () => submitAnswer(i + 1, b));
+    box.appendChild(b);
+  }
+  $("sentInfo").textContent = "";
+  state.endsAt = Date.now() + q.seconds * 1000;
+  clearInterval(state.questionTimer);
+  state.questionTimer = setInterval(() => {
+    const left = Math.max(0, Math.ceil((state.endsAt - Date.now()) / 1000));
+    $("timer").textContent = left + " s";
+    if (left === 0) clearInterval(state.questionTimer);
+  }, 250);
+  show("question");
+}
+
+function renderReveal(correctIndex) {
+  const ok = state.myAnswer !== null && state.myAnswer === correctIndex;
+  const answered = state.myAnswer !== null;
+  $("resultText").innerHTML = answered
+    ? `<div class="${ok ? "resultOk" : "resultKo"}">${ok ? "✅ Bonne réponse !" : "❌ Raté"}</div>`
+    : `<div class="resultKo">⏱ Temps écoulé</div>`;
+  document.querySelectorAll("#answers .answer").forEach((b, i) => {
+    if (i + 1 === correctIndex) b.classList.add("correct");
+  });
+  show("reveal");
+}
+
+async function poll() {
+  if (!state.code) return;
+  try {
+    const room = await api(`/api/rooms/${state.code}`);
+    if (room.state === "lobby") {
+      $("playerList").innerHTML = room.players.map((p) => `<li>${escapeHtml(p.name)}</li>`).join("");
+      show("lobby");
+    } else if (room.state === "question" && room.question && room.question.id !== state.lastQuestionId) {
+      renderQuestion(room.question);
+    } else if (room.state === "reveal" && state.screen !== "reveal" && room.correctIndex) {
+      renderReveal(room.correctIndex);
+    } else if (room.state === "finished") {
+      if (state.screen !== "finished") renderRanking(room.ranking || []);
+    }
+  } catch (err) {
+    if (err.message === "Salon introuvable") {
+      leaveGame("Ce salon n'existe plus. Entre le code de la nouvelle partie.");
+    }
+    // Erreur réseau passagère : on réessaie au prochain tour
+  }
+}
+
+function renderRanking(ranking) {
+  const list = $("rankingList");
+  list.innerHTML = "";
+  let myRank = -1;
+  ranking.forEach((entry, i) => {
+    if (entry.name === state.name && myRank === -1) myRank = i;
+    const li = document.createElement("li");
+    li.textContent = `${entry.name} : ${entry.score} pts`;
+    if (i === myRank) li.style.fontWeight = "bold";
+    list.appendChild(li);
+  });
+  const mine = myRank >= 0 ? ranking[myRank] : null;
+  $("myResult").textContent = mine
+    ? `Tu finis ${myRank + 1} / ${ranking.length} avec ${mine.score} pts`
+    : "Merci d'avoir joué !";
+  show("finished");
+}
+
+function leaveGame(message) {
+  clearInterval(pollTimer);
+  clearInterval(state.questionTimer);
+  localStorage.removeItem("quizSession");
+  if (message) sessionStorage.setItem("quizFlash", message);
+  location.href = location.pathname;
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+let pollTimer = null;
+function startPolling() {
+  show("lobby");
+  clearInterval(pollTimer);
+  pollTimer = setInterval(poll, 1000);
+  poll();
+}
+
+$("joinBtn").addEventListener("click", join);
+$("newGameBtn").addEventListener("click", () => leaveGame());
+$("codeInput").addEventListener("input", (e) => (e.target.value = e.target.value.toUpperCase()));
+
+// Reprise automatique si la page est rechargée
+const saved = JSON.parse(localStorage.getItem("quizSession") || "null");
+if (saved) {
+  state.code = saved.code;
+  state.playerId = saved.playerId;
+  state.name = saved.name;
+  startPolling();
+}
+const flash = sessionStorage.getItem("quizFlash");
+if (flash) {
+  sessionStorage.removeItem("quizFlash");
+  $("joinError").textContent = flash;
+}
+const params = new URLSearchParams(location.search);
+if (params.get("code") && !saved) $("codeInput").value = params.get("code").toUpperCase();
+</script>
+</body>
+</html>
